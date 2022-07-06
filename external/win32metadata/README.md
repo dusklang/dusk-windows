@@ -1,0 +1,1 @@
+This directory contains files copied from https://github.com/microsoft/win32metadata. [LICENSE](./LICENSE) applies to all files in this directory except for this README, which is covered by the LICENSE in the root of this repository.

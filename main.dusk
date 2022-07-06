@@ -1,0 +1,174 @@
+fn main() {
+    metadata := read_file("external/win32metadata/Windows.Win32.winmd")
+    print("read metadata file!\n")
+    free_slice(metadata)
+}
+
+
+
+
+// Library code.
+ByteSlice :: struct {
+    size: usize
+    data: u8 *mut
+}
+
+fn new_slice(size: usize): ByteSlice {
+    ByteSlice {
+        size: size
+        data: malloc(size) as u8 *mut
+    }
+}
+
+fn read_file(path: i8*): ByteSlice {
+    file :: kernel32.CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, 0 as usize as SECURITY_ATTRIBUTES *mut, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0 as usize as HANDLE)
+    invalid :: -1 as isize as usize as HANDLE
+    if file as usize == _debug_mark(INVALID_HANDLE_VALUE()) as usize {
+        panic("unable to open file")
+    }
+
+    size := 0 as u64
+    succ :: kernel32.GetFileSizeEx(file, &mut size)
+    if succ == FALSE {
+        panic("unable to get file size")
+    }
+
+    size :: size as usize
+    buf :: malloc(size)
+
+    i := 0 as usize
+    while i < size {
+        bytes_to_read :: (size - i) as DWORD
+        bytes_read := 0 as DWORD
+        succ :: kernel32.ReadFile(file, (buf as usize + i) as void *mut, bytes_to_read, &mut bytes_read, 0 as usize as OVERLAPPED *mut)
+        if succ == FALSE {
+            panic("unable to read from file")
+        }
+        i += bytes_read as usize
+    }
+    ignore :: kernel32.CloseHandle(file)
+
+    ByteSlice {
+        size: size
+        data: buf as u8 *mut
+    }
+}
+
+fn write_byte(slice: ByteSlice, index: u16, value: u8) {
+    *((slice.data as usize + index as usize) as u8 *mut) = value
+}
+
+fn read_byte(slice: ByteSlice, index: u16): u8 {
+    *((slice.data as usize + index as usize) as u8*)
+}
+
+fn free_slice(slice: ByteSlice *mut) {
+    free(slice.data as void *mut)
+    slice.data = 0 as usize as u8 *mut
+    slice.size = 0
+}
+
+fn print_num(num: i64) {
+    num := num
+    if num < 0 {
+        print("-")
+        num = -num
+    }
+    if num >= 10 {
+        print_num(num / 10)
+    }
+    print((num % 10) as u8 + "0")
+}
+
+fn print_num(num: u64) {
+    num := num
+    if num >= 10 {
+        print_num(num / 10)
+    }
+    print((num % 10) as u8 + "0")
+}
+
+fn print_byte_recurse(num: u8, count: u8) {
+    num := num
+    if count < 1 {
+        print_byte_recurse(num / 16, count + 1)
+    }
+    num = num % 16
+    if num >= 10 {
+        print(num as u8 - 10 + "A")
+    } else {
+        print(num as u8 + "0")
+    }
+}
+
+fn print_byte(num: u8) {
+    print("$")
+    print_byte_recurse(num, 0)
+}
+
+fn print_word(num: u16) {
+    print("$")
+    print_byte_recurse((num >> 8) as u8, 0)
+    print_byte_recurse(num as u8, 0)
+}
+
+
+
+
+// Windows FFI code. To be cleaned up later
+
+HWND :: void *mut
+HANDLE :: void *mut
+
+MB_OK :: 0 as u32
+FILE_SHARE_READ :: 1 as DWORD
+
+fn INVALID_HANDLE_VALUE(): HANDLE {
+    -1 as isize as usize as HANDLE
+}
+DWORD :: u32
+STD_INPUT_HANDLE :: (-10) as i32 as DWORD
+STD_OUTPUT_HANDLE :: (-11) as i32 as DWORD
+STD_ERROR_HANDLE :: (-12) as i32 as DWORD
+BOOL :: i32
+TRUE :: 1
+FALSE :: 0
+
+GENERIC_READ :: 2147483648 as DWORD
+GENERIC_WRITE :: 1073741824 as DWORD
+
+CREATE_ALWAYS :: 2 as DWORD
+CREATE_NEW :: 1 as DWORD
+OPEN_ALWAYS :: 4 as DWORD
+OPEN_EXISTING :: 3 as DWORD
+TRUNCATE_EXISTING :: 5 as DWORD
+
+FILE_ATTRIBUTE_NORMAL :: 128 as DWORD
+
+// it is not currently possible to have constant pointers, which is why this is a function for now
+fn NULL(): void *mut { 0 as usize as void *mut }
+
+SECURITY_ATTRIBUTES :: struct {
+    nLength: DWORD
+    lpSecurityDescriptor: void *mut
+    bInheritHandle: BOOL
+}
+
+OVERLAPPED :: struct {}
+
+kernel32 :: extern_mod("kernel32.dll") {
+    fn GetStdHandle(nStdHandle: DWORD): HANDLE
+    fn WriteConsoleA(hConsoleOutput: HANDLE, lpBuffer: void*, nNumberOfCharsToWrite: DWORD, lpNumberOfCharsWritten: DWORD *mut, lpReserved: void *mut): BOOL
+    fn ReadConsoleA(hConsoleInput: HANDLE, lpBuffer: void *mut, nNumberOfCharsToRead: DWORD, lpNumberOfCharsRead: DWORD *mut, pInputControl: void *mut): BOOL
+    fn CreateFileA(lpFileName: i8*, dwDesiredAccess: DWORD, dwShareMode: DWORD, lpSecurityAttributes: SECURITY_ATTRIBUTES *mut, dwCreationDisposition: DWORD, dwFlagsAndAttributes: DWORD, hTemplateFile: HANDLE): HANDLE
+    fn CloseHandle(hObject: HANDLE): BOOL
+    fn GetFileSizeEx(hFile: HANDLE, lpFileSize: u64 *mut): BOOL
+    fn ReadFile(hFile: HANDLE, lpBuffer: void *mut, nNumberOfBytesToRead: DWORD, lpNumberOfBytesRead: DWORD *mut, lpOverlapped: OVERLAPPED *mut): BOOL
+
+    fn QueryPerformanceCounter(lpPerformanceCount: u64 *mut): BOOL
+    fn QueryPerformanceFrequency(lpFrequency: u64 *mut): BOOL
+}
+
+user32 :: extern_mod("user32.dll") {
+    fn MessageBoxA(hwnd: HWND, lpText: i8*, lpCaption: i8*, uType: u32): i32
+}

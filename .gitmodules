@@ -1,0 +1,3 @@
+[submodule "external/sdk-api"]
+	path = external/sdk-api
+	url = https://github.com/MicrosoftDocs/sdk-api
