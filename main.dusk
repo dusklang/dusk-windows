@@ -1,9 +1,123 @@
-fn main() {
-    metadata := read_file("external/win32metadata/Windows.Win32.winmd")
-    print("read metadata file!\n")
-    free_slice(metadata)
+PEHeader :: struct {
+    machine: u16
+    number_of_sections: u16
+    time_date_stamp: u32
+    pointer_to_symbol_table: u32
+    number_of_symbols: u32
+    optional_header_size: u16
+    characteristics: u16
 }
 
+PEDataDirectory :: struct {
+    rva: u32
+    size: u32
+}
+
+PEOptionalHeader :: struct {
+    // standard fields
+    magic: u16
+    l_major: u8
+    l_minor: u8
+    code_size: u32
+    initialized_data_size: u32
+    uninitialized_data_size: u32
+    entry_point_rva: u32
+    base_of_code: u32
+    base_of_data: u32
+
+    // NT-specific fields
+    image_base: u32
+    section_alignment: u32
+    file_alignment: u32
+    os_major: u16
+    os_minor: u16
+    user_major: u16
+    user_minor: u16
+    subsys_major: u16
+    subsys_minor: u16
+    reserved: u32
+    image_size: u32
+    header_size: u32
+    file_checksum: u32
+    subsystem: u16
+    dll_flags: u16
+    stack_reserve_size: u32
+    stack_commit_size: u32
+    heap_reserve_size: u32
+    heap_commit_size: u32
+    loader_flags: u32
+    number_of_data_directories: u32
+
+    // Data directories
+    export_table: PEDataDirectory
+    import_table: PEDataDirectory
+    resource_table: PEDataDirectory
+    exception_table: PEDataDirectory
+    certificate_table: PEDataDirectory
+    base_relocation_table: PEDataDirectory
+    debug_table: PEDataDirectory
+    copyright_table: PEDataDirectory
+    global_ptr_table: PEDataDirectory
+    tls_table: PEDataDirectory
+    load_config_table: PEDataDirectory
+    bound_import_table: PEDataDirectory
+    iat: PEDataDirectory
+    delay_import_descriptor: PEDataDirectory
+    cli_header: PEDataDirectory
+    reserved_table: PEDataDirectory
+}
+
+PESectionHeader :: struct {
+    // TODO: fixed size arrays
+    name: u64
+    virtual_size: u32
+    virtual_address: u32
+    size_of_raw_data: u32
+    pointer_to_raw_data: u32
+    pointer_to_relocations: u32
+    pointer_to_linenumbers: u32
+    number_of_relocations: u16
+    number_of_linenumbers: u16
+    characteristics: u32
+}
+
+fn main() {
+    metadata := read_file("external/win32metadata/Windows.Win32.winmd")
+    
+    signature_location :: read_u32(metadata, $3c)
+    if read_byte(metadata, signature_location) != "P" || read_byte(metadata, signature_location+1) != "E" || read_byte(metadata, signature_location+2) != 0 || read_byte(metadata, signature_location+3) != 0 {
+        panic("Invalid PE signature. Exiting.")
+    }
+    cursor := signature_location + 4
+    // TODO: reverse endianness when running on a big-endian CPU
+    header :: read_pe_header(metadata, cursor)
+    if header.machine != $14c {
+        panic("Invalid machine number in PE file header. Exiting.")
+    }
+    if header.optional_header_size as usize != size_of(PEOptionalHeader) {
+        panic("Invalid optional header size. Exiting.")
+    }
+
+    cursor += size_of(PEHeader) as u32
+    optional_header :: read_pe_optional_header(metadata, cursor)
+    if optional_header.magic != $10b {
+        panic("Invalid PE optional header magic")
+    }
+    i: u16 = 0
+    cursor += size_of(PEOptionalHeader) as u32
+    while i < header.number_of_sections {
+        section_header :: read_pe_section_header(metadata, cursor)
+        print("Section '")
+        // TODO: handle case where name is 8 characters long, which means there is no null terminator
+        print(&section_header.name as u8*)
+        print("'\n")
+        cursor += size_of(PESectionHeader) as u32
+        i += 1
+    }
+
+
+    free_slice(&mut metadata)
+}
 
 
 
@@ -54,12 +168,42 @@ fn read_file(path: i8*): ByteSlice {
     }
 }
 
-fn write_byte(slice: ByteSlice, index: u16, value: u8) {
+fn write_byte(slice: ByteSlice, index: u32, value: u8) {
     *((slice.data as usize + index as usize) as u8 *mut) = value
 }
 
-fn read_byte(slice: ByteSlice, index: u16): u8 {
+fn read_byte(slice: ByteSlice, index: u32): u8 {
     *((slice.data as usize + index as usize) as u8*)
+}
+
+fn read_u32(slice: ByteSlice, index: u32): u32 {
+    *((slice.data as usize + index as usize) as u32*)
+}
+
+// TODO: This function doesn't work yet, unfortunately
+fn read_as[T](slice: ByteSlice, index: u32): T {
+    if index as usize + size_of(T) > slice.size {
+        panic("index off the end")
+    }
+    *((slice.data as usize + index as usize) as T*)
+}
+fn read_pe_header(slice: ByteSlice, index: u32): PEHeader {
+    if index as usize + size_of(PEHeader) > slice.size {
+        panic("index off the end")
+    }
+    *((slice.data as usize + index as usize) as PEHeader*)
+}
+fn read_pe_optional_header(slice: ByteSlice, index: u32): PEOptionalHeader {
+    if index as usize + size_of(PEOptionalHeader) > slice.size {
+        panic("index off the end")
+    }
+    *((slice.data as usize + index as usize) as PEOptionalHeader*)
+}
+fn read_pe_section_header(slice: ByteSlice, index: u32): PESectionHeader {
+    if index as usize + size_of(PESectionHeader) > slice.size {
+        panic("index off the end")
+    }
+    *((slice.data as usize + index as usize) as PESectionHeader*)
 }
 
 fn free_slice(slice: ByteSlice *mut) {
