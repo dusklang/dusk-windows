@@ -8,7 +8,8 @@ PEHeader :: struct {
     characteristics: u16
 }
 
-PEDataDirectory :: struct {
+/// Reference to a slice of bytes of size `size` in the PE file, starting at `rva`
+PEReference :: struct {
     rva: u32
     size: u32
 }
@@ -49,22 +50,22 @@ PEOptionalHeader :: struct {
     number_of_data_directories: u32
 
     // Data directories
-    export_table: PEDataDirectory
-    import_table: PEDataDirectory
-    resource_table: PEDataDirectory
-    exception_table: PEDataDirectory
-    certificate_table: PEDataDirectory
-    base_relocation_table: PEDataDirectory
-    debug_table: PEDataDirectory
-    copyright_table: PEDataDirectory
-    global_ptr_table: PEDataDirectory
-    tls_table: PEDataDirectory
-    load_config_table: PEDataDirectory
-    bound_import_table: PEDataDirectory
-    iat: PEDataDirectory
-    delay_import_descriptor: PEDataDirectory
-    cli_header: PEDataDirectory
-    reserved_table: PEDataDirectory
+    export_table: PEReference
+    import_table: PEReference
+    resource_table: PEReference
+    exception_table: PEReference
+    certificate_table: PEReference
+    base_relocation_table: PEReference
+    debug_table: PEReference
+    copyright_table: PEReference
+    global_ptr_table: PEReference
+    tls_table: PEReference
+    load_config_table: PEReference
+    bound_import_table: PEReference
+    iat: PEReference
+    delay_import_descriptor: PEReference
+    cli_header: PEReference
+    reserved_table: PEReference
 }
 
 PESectionHeader :: struct {
@@ -81,6 +82,79 @@ PESectionHeader :: struct {
     characteristics: u32
 }
 
+CLIHeader :: struct {
+    cb: u32
+    major_runtime_version: u16
+    minor_runtime_version: u16
+    meta_data: PEReference
+    flags: u32
+    entry_point_token: u32
+    resources: PEReference
+    strong_name_signature: PEReference
+    code_manager_table: PEReference
+    v_table_fixups: PEReference
+    export_address_table_jumps: PEReference
+    managed_native_header: PEReference
+}
+
+PEFile :: struct {
+    image: ByteSlice
+    header: PEHeader*
+    optional_header: PEOptionalHeader*
+    sections: PESectionHeader*
+
+    cli_header: CLIHeader*
+    md_root: MDRoot
+}
+
+MDRoot :: struct {
+    part1: MDRootPart1*
+    version: u8*
+    part2: MDRootPart2*
+    streams: u32 // file offset
+}
+MDRootPart1 :: struct {
+    signature: u32
+    major_version: u16
+    minor_version: u16
+    reserved: u32
+    length: u32
+}
+MDRootPart2 :: struct {
+    flags: u16
+    number_of_streams: u16
+}
+
+MDStreamHeader :: struct {
+    offset: u32
+    size: u32
+    // name: variable length string
+}
+
+fn get_section(file: PEFile*, index: u16): PESectionHeader* {
+    if index >= file.header.number_of_sections {
+        panic("index out of bounds")
+    } 
+    (file.sections as usize + index as usize * size_of(PESectionHeader)) as PESectionHeader*
+}
+
+fn resolve_rva(file: PEFile*, rva: u32): u32 {
+    i: u16 = 0
+    // This variable is here to work around bug #121
+    address: u32 = $FFFF
+    while i < file.header.number_of_sections {
+        section :: get_section(file, i)
+        if section.virtual_address <= rva && rva < section.virtual_address + section.size_of_raw_data {
+            address = rva - section.virtual_address + section.pointer_to_raw_data
+        }
+        i += 1
+    }
+    if address == $FFFF {
+        panic("failed to resolve RVA")
+    }
+    address
+}
+
 fn main() {
     metadata := read_file("external/win32metadata/Windows.Win32.winmd")
     
@@ -88,9 +162,9 @@ fn main() {
     if read_byte(metadata, signature_location) != "P" || read_byte(metadata, signature_location+1) != "E" || read_byte(metadata, signature_location+2) != 0 || read_byte(metadata, signature_location+3) != 0 {
         panic("Invalid PE signature. Exiting.")
     }
-    cursor := signature_location + 4
+    pe_header_location :: signature_location + 4
     // TODO: reverse endianness when running on a big-endian CPU
-    header :: read_pe_header(metadata, cursor)
+    header :: read_pe_header(metadata, pe_header_location)
     if header.machine != $14c {
         panic("Invalid machine number in PE file header. Exiting.")
     }
@@ -98,23 +172,36 @@ fn main() {
         panic("Invalid optional header size. Exiting.")
     }
 
-    cursor += size_of(PEHeader) as u32
-    optional_header :: read_pe_optional_header(metadata, cursor)
+    pe_optional_header_location :: pe_header_location + size_of(PEHeader) as u32
+    optional_header :: read_pe_optional_header(metadata, pe_optional_header_location)
     if optional_header.magic != $10b {
         panic("Invalid PE optional header magic")
     }
-    i: u16 = 0
-    cursor += size_of(PEOptionalHeader) as u32
-    while i < header.number_of_sections {
-        section_header :: read_pe_section_header(metadata, cursor)
-        print("Section '")
-        // TODO: handle case where name is 8 characters long, which means there is no null terminator
-        print(&section_header.name as u8*)
-        print("'\n")
-        cursor += size_of(PESectionHeader) as u32
-        i += 1
+    sections_location :: pe_optional_header_location + size_of(PEOptionalHeader) as u32
+    first_section_header :: read_pe_section_header(metadata, sections_location)
+    file := PEFile {
+        image: metadata
+        header: header
+        optional_header: optional_header
+        sections: first_section_header
+        cli_header: 0 as usize as CLIHeader*,
+        md_root: MDRoot {
+            part1: 0 as usize as MDRootPart1*
+            version: 0 as usize as u8*
+            part2: 0 as usize as MDRootPart2*
+            streams: 0 as u32
+        }
     }
-
+    cli_location :: resolve_rva(&file, file.optional_header.cli_header.rva)
+    file.cli_header = read_cli_header(metadata, cli_location)
+    md_root_location :: resolve_rva(&file, file.cli_header.meta_data.rva)
+    file.md_root = read_metadata_root(metadata, md_root_location)
+    if file.md_root.part1.signature != $424a5342 {
+        panic("invalid metadata magic signature")
+    }
+    print("The version is ")
+    print(file.md_root.version)
+    print("\n")
 
     free_slice(&mut metadata)
 }
@@ -187,23 +274,53 @@ fn read_as[T](slice: ByteSlice, index: u32): T {
     }
     *((slice.data as usize + index as usize) as T*)
 }
-fn read_pe_header(slice: ByteSlice, index: u32): PEHeader {
+fn read_pe_header(slice: ByteSlice, index: u32): PEHeader* {
     if index as usize + size_of(PEHeader) > slice.size {
         panic("index off the end")
     }
-    *((slice.data as usize + index as usize) as PEHeader*)
+    ((slice.data as usize + index as usize) as PEHeader*)
 }
-fn read_pe_optional_header(slice: ByteSlice, index: u32): PEOptionalHeader {
+fn read_pe_optional_header(slice: ByteSlice, index: u32): PEOptionalHeader* {
     if index as usize + size_of(PEOptionalHeader) > slice.size {
         panic("index off the end")
     }
-    *((slice.data as usize + index as usize) as PEOptionalHeader*)
+    ((slice.data as usize + index as usize) as PEOptionalHeader*)
 }
-fn read_pe_section_header(slice: ByteSlice, index: u32): PESectionHeader {
+fn read_pe_section_header(slice: ByteSlice, index: u32): PESectionHeader* {
     if index as usize + size_of(PESectionHeader) > slice.size {
         panic("index off the end")
     }
-    *((slice.data as usize + index as usize) as PESectionHeader*)
+    ((slice.data as usize + index as usize) as PESectionHeader*)
+}
+fn read_md_root_part_1(slice: ByteSlice, index: u32): MDRootPart1* {
+    if index as usize + size_of(MDRootPart1) > slice.size {
+        panic("index off the end")
+    }
+    ((slice.data as usize + index as usize) as MDRootPart1*)
+}
+fn read_md_root_part_2(slice: ByteSlice, index: u32): MDRootPart2* {
+    if index as usize + size_of(MDRootPart2) > slice.size {
+        panic("index off the end")
+    }
+    ((slice.data as usize + index as usize) as MDRootPart2*)
+}
+fn read_metadata_root(slice: ByteSlice, index: u32): MDRoot {
+    part1 :: read_md_root_part_1(slice, index)
+    version :: (slice.data as usize + index as usize + size_of(MDRootPart1)) as u8*
+    part2 :: read_md_root_part_2(slice, index + size_of(MDRootPart1) as u32 + part1.length as u32)
+    MDRoot {
+        part1: part1
+        version: version
+        part2: part2
+        streams: index + size_of(MDRootPart1) as u32 + part1.length + size_of(MDRootPart2) as u32
+    }
+}
+
+fn read_cli_header(slice: ByteSlice, index: u32): CLIHeader* {
+    if index as usize + size_of(CLIHeader) > slice.size {
+        panic("index off the end")
+    }
+    ((slice.data as usize + index as usize) as CLIHeader*)
 }
 
 fn free_slice(slice: ByteSlice *mut) {
