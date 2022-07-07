@@ -105,6 +105,14 @@ PEFile :: struct {
 
     cli_header: CLIHeader*
     md_root: MDRoot
+
+    // Headers for the metadata streams. A null `name` field indicates a nonexistent stream.
+    // TODO: optionals.
+    strings_header: MDStreamHeader
+    user_strings_header: MDStreamHeader
+    blob_header: MDStreamHeader
+    guid_header: MDStreamHeader
+    md_tables_header: MDStreamHeader
 }
 
 MDRoot :: struct {
@@ -128,7 +136,12 @@ MDRootPart2 :: struct {
 MDStreamHeader :: struct {
     offset: u32
     size: u32
-    // name: variable length string
+    name: u8*
+}
+
+// TODO: this could be a global constant after implementing the updated interpreter memory model
+fn no_stream(): MDStreamHeader {
+    MDStreamHeader { offset: 0, size: 0, name: 0 as usize as u8* }
 }
 
 fn get_section(file: PEFile*, index: u16): PESectionHeader* {
@@ -191,6 +204,11 @@ fn main() {
             part2: 0 as usize as MDRootPart2*
             streams: 0 as u32
         }
+        strings_header: no_stream()
+        user_strings_header: no_stream()
+        blob_header: no_stream()
+        guid_header: no_stream()
+        md_tables_header: no_stream()
     }
     cli_location :: resolve_rva(&file, file.optional_header.cli_header.rva)
     file.cli_header = read_cli_header(metadata, cli_location)
@@ -199,9 +217,31 @@ fn main() {
     if file.md_root.part1.signature != $424a5342 {
         panic("invalid metadata magic signature")
     }
-    print("The version is ")
-    print(file.md_root.version)
-    print("\n")
+    i: u16 = 0
+    cursor := file.md_root.streams
+    while i < file.md_root.part2.number_of_streams {
+        stream_header :: read_md_stream_header(file.image, cursor)
+        // TODO: handle duplicate stream headers, I guess
+        // TODO: switching on strings
+        if strequals(stream_header.name, "#~") {
+            file.md_tables_header = stream_header
+            print("Found table stream header\n")
+        } else if strequals(stream_header.name, "#Strings") {
+            file.strings_header = stream_header
+            print("Found strings stream header\n")
+        } else if strequals(stream_header.name, "#US") {
+            file.user_strings_header = stream_header
+            print("Found user strings stream header\n")
+        } else if strequals(stream_header.name, "#Blob") {
+            file.blob_header = stream_header
+            print("Found blob stream header\n")
+        } else if strequals(stream_header.name, "#GUID") {
+            file.guid_header = stream_header
+            print("Found GUID stream header\n")
+        }
+        next_md_stream_header(stream_header, &mut cursor)
+        i += 1
+    }
 
     free_slice(&mut metadata)
 }
@@ -292,6 +332,12 @@ fn read_pe_section_header(slice: ByteSlice, index: u32): PESectionHeader* {
     }
     ((slice.data as usize + index as usize) as PESectionHeader*)
 }
+fn read_cli_header(slice: ByteSlice, index: u32): CLIHeader* {
+    if index as usize + size_of(CLIHeader) > slice.size {
+        panic("index off the end")
+    }
+    ((slice.data as usize + index as usize) as CLIHeader*)
+}
 fn read_md_root_part_1(slice: ByteSlice, index: u32): MDRootPart1* {
     if index as usize + size_of(MDRootPart1) > slice.size {
         panic("index off the end")
@@ -315,12 +361,48 @@ fn read_metadata_root(slice: ByteSlice, index: u32): MDRoot {
         streams: index + size_of(MDRootPart1) as u32 + part1.length + size_of(MDRootPart2) as u32
     }
 }
-
-fn read_cli_header(slice: ByteSlice, index: u32): CLIHeader* {
-    if index as usize + size_of(CLIHeader) > slice.size {
-        panic("index off the end")
+fn next_multiple_of_4_exclusive(num: u32): u32 {
+    num := num + 1
+    while num % 4 != 0 {
+        num += 1
     }
-    ((slice.data as usize + index as usize) as CLIHeader*)
+    num
+}
+fn strlen(str: u8*): usize {
+    cursor := str as usize
+    while *(cursor as u8*) != 0 {
+        cursor += 1
+    }
+    cursor - str as usize
+}
+fn strequals(l: u8*, r: u8*): bool {
+    l_len :: strlen(l)
+    r_len :: strlen(r)
+    if l_len != r_len { return false }
+    l_cursor := l as usize
+    r_cursor := r as usize
+    while *(l_cursor as u8*) == *(r_cursor as u8*) && *(l_cursor as u8*) != 0 {
+        l_cursor += 1
+        r_cursor += 1
+    }
+    l_cursor - l as usize == l_len
+}
+fn next_md_stream_header(stream_header: MDStreamHeader, offset: u32 *mut) {
+    ptr := stream_header.name as usize
+    *offset += 8
+    while *(ptr as u8*) != 0 {
+        ptr += 1
+        *offset += 1
+    }
+    *offset = next_multiple_of_4_exclusive(*offset)
+}
+fn read_md_stream_header(slice: ByteSlice, index: u32): MDStreamHeader {
+    // TODO: bounds checks
+    MDStreamHeader {
+        offset: *((slice.data as usize + index as usize) as u32*)
+        size: *((slice.data as usize + index as usize + 4) as u32*)
+        name: (slice.data as usize + index as usize + 8) as u8*
+    }
 }
 
 fn free_slice(slice: ByteSlice *mut) {
