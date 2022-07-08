@@ -132,11 +132,21 @@ MDRootPart2 :: struct {
     flags: u16
     number_of_streams: u16
 }
-
 MDStreamHeader :: struct {
     offset: u32
     size: u32
     name: u8*
+}
+
+MDTablesStart :: struct {
+    reserved1: u32
+    major_version: u8
+    minor_version: u8
+    heap_sizes: u8
+    reserved2: u8
+    valid: u64
+    sorted: u64
+    first_row_location: u32
 }
 
 // TODO: this could be a global constant after implementing the updated interpreter memory model
@@ -168,6 +178,64 @@ fn resolve_rva(file: PEFile*, rva: u32): u32 {
     address
 }
 
+fn count_set_bits(num: u64): u64 {
+    i: u64 = 0
+    num_set: u64 = 0
+    while i < 64 {
+        if (num & (1 << i)) != 0 {
+            num_set += 1
+        }
+        i += 1
+    }
+    num_set
+}
+
+DynamicParser :: struct {
+    file: ByteSlice
+    cursor: u32
+    heap_sizes: u8
+}
+
+fn parser(file: ByteSlice, begin: u32, heap_sizes: u8): DynamicParser {
+    DynamicParser {
+        file: file
+        cursor: begin
+        heap_sizes: heap_sizes
+    }
+}
+
+fn parse_u16(self: DynamicParser *mut): u16 {
+    val :: *((self.file.data as usize + self.cursor as usize) as u16*)
+    self.cursor += size_of(u16) as u32
+    val
+}
+fn parse_u32(self: DynamicParser *mut): u32 {
+    val :: *((self.file.data as usize + self.cursor as usize) as u32*)
+    self.cursor += size_of(u32) as u32
+    val
+}
+
+fn parse_string_heap_index(self: DynamicParser *mut): u32 {
+    if (self.heap_sizes & 1) != 0 {
+        parse_u32(self)
+    } else {
+        parse_u16(self) as u32
+    }
+}
+fn parse_guid_heap_index(self: DynamicParser *mut): u32 {
+    if (self.heap_sizes & 2) != 0 {
+        parse_u32(self)
+    } else {
+        parse_u16(self) as u32
+    }
+}
+fn parse_blob_heap_index(self: DynamicParser *mut): u32 {
+    if (self.heap_sizes & 4) != 0 {
+        parse_u32(self)
+    } else {
+        parse_u16(self) as u32
+    }
+}
 fn main() {
     metadata := read_file("external/win32metadata/Windows.Win32.winmd")
     
@@ -240,6 +308,65 @@ fn main() {
             print("Found GUID stream header\n")
         }
         next_md_stream_header(stream_header, &mut cursor)
+        i += 1
+    }
+
+    if file.md_tables_header.size == 0 {
+        panic("Non-existent metadata header")
+    }
+    // Read #~ stream
+    md_tables_start_location :: file.md_tables_header.offset + md_root_location
+    md_tables_start :: read_md_tables_start(file.image, md_tables_start_location)
+    if md_tables_start.reserved1 != 0 || md_tables_start.reserved2 != 1 {
+        panic("unexpected reserved value in metadata tables start")
+    }
+    num_present_tables :: count_set_bits(md_tables_start.valid)
+    tables_begin :: md_tables_start.first_row_location + (num_present_tables * 4) as u32
+    string_heap_location :: file.strings_header.offset + md_root_location
+    parser := parser(file.image, tables_begin, md_tables_start.heap_sizes)
+    i: u64 = 0
+    present_i: u32 = 0
+    while i < 64 {
+        if (md_tables_start.valid & (1 << i)) != 0 {
+            num_rows_location :: md_tables_start.first_row_location + present_i * 4
+            num_rows :: *((file.image.data as usize + num_rows_location as usize) as u32*)
+            switch i {
+                $00: {
+                    print("Module table:\n")
+                    j: u32 = 0
+                    while j < num_rows {
+                        print("  Module entry:\n")
+                        j += 1
+                        generation :: parse_u16(&mut parser)
+                        print("    Generation: ")
+                        print_num(generation as u64)
+                        print("\n")
+                        name :: parse_string_heap_index(&mut parser)
+                        print("    Name: ")
+                        print((file.image.data as usize + (string_heap_location as u32 + name) as usize) as u8*)
+                        print("\n")
+                        mvid :: parse_guid_heap_index(&mut parser)
+                        print("    Mvid: ")
+                        print_num(mvid as u64)
+                        print("\n")
+                        enc_id :: parse_guid_heap_index(&mut parser)
+                        print("    EncId: ")
+                        print_num(enc_id as u64)
+                        print("\n")
+                        enc_base_id :: parse_guid_heap_index(&mut parser)
+                        print("    EncBaseId: ")
+                        print_num(enc_base_id as u64)
+                        print("\n")
+                    }
+                }
+                default: {
+                    print("unhandled table ")
+                    print_num(i)
+                    panic()
+                }
+            }
+            present_i += 1
+        }
         i += 1
     }
 
@@ -360,6 +487,14 @@ fn read_metadata_root(slice: ByteSlice, index: u32): MDRoot {
         part2: part2
         streams: index + size_of(MDRootPart1) as u32 + part1.length + size_of(MDRootPart2) as u32
     }
+}
+fn read_md_tables_start(slice: ByteSlice, index: u32): MDTablesStart {
+    if index as usize + size_of(MDTablesStart) > slice.size {
+        panic("index off the end")
+    }
+    start := *((slice.data as usize + index as usize) as MDTablesStart*)
+    start.first_row_location = index + + offset_of(MDTablesStart, "first_row_location") as u32
+    start
 }
 fn next_multiple_of_4_exclusive(num: u32): u32 {
     num := num + 1
