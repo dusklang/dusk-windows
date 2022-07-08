@@ -320,6 +320,8 @@ fn main() {
     if md_tables_start.reserved1 != 0 || md_tables_start.reserved2 != 1 {
         panic("unexpected reserved value in metadata tables start")
     }
+
+    // TODO: store an array with the number of rows for each table
     num_present_tables :: count_set_bits(md_tables_start.valid)
     tables_begin :: md_tables_start.first_row_location + (num_present_tables * 4) as u32
     string_heap_location :: file.strings_header.offset + md_root_location
