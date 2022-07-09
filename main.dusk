@@ -867,3 +867,13 @@ kernel32 :: extern_mod("kernel32.dll") {
 user32 :: extern_mod("user32.dll") {
     fn MessageBoxA(hwnd: HWND, lpText: i8*, lpCaption: i8*, uType: u32): i32
 }
+
+
+/* POC for a way to generate FFI bindings at compile time, that actually seems somewhat feasible in the short term:
+windows :: do {
+    module := compiler.new_module_builder()
+    parameters := compiler.new_parameter_buffer()
+    parameters.add("nStdHandle", DWORD)
+    module.add_extern_prototype("GetStdHandle", parameters, HANDLE, ExternSource.dll("kernel32.dll"))
+    module.build()
+}*
