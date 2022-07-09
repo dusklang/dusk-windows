@@ -113,6 +113,9 @@ PEFile :: struct {
     blob_header: MDStreamHeader
     guid_header: MDStreamHeader
     md_tables_header: MDStreamHeader
+
+    md_tables_start: MDTablesStart
+    md_tables_begin_location: u32 // The location of the first physical metadata table
 }
 
 MDRoot :: struct {
@@ -179,9 +182,12 @@ fn resolve_rva(file: PEFile*, rva: u32): u32 {
 }
 
 fn count_set_bits(num: u64): u64 {
+    count_set_bits_before(num, 64)
+}
+fn count_set_bits_before(num: u64, bit: u64): u64 {
     i: u64 = 0
     num_set: u64 = 0
-    while i < 64 {
+    while i < bit {
         if (num & (1 << i)) != 0 {
             num_set += 1
         }
@@ -191,49 +197,166 @@ fn count_set_bits(num: u64): u64 {
 }
 
 DynamicParser :: struct {
-    file: ByteSlice
+    file: PEFile*
     cursor: u32
-    heap_sizes: u8
 }
 
-fn parser(file: ByteSlice, begin: u32, heap_sizes: u8): DynamicParser {
+fn parser(file: PEFile*, begin: u32): DynamicParser {
     DynamicParser {
         file: file
         cursor: begin
-        heap_sizes: heap_sizes
     }
 }
 
 fn parse_u16(self: DynamicParser *mut): u16 {
-    val :: *((self.file.data as usize + self.cursor as usize) as u16*)
+    val :: *((self.file.image.data as usize + self.cursor as usize) as u16*)
     self.cursor += size_of(u16) as u32
     val
 }
 fn parse_u32(self: DynamicParser *mut): u32 {
-    val :: *((self.file.data as usize + self.cursor as usize) as u32*)
+    val :: *((self.file.image.data as usize + self.cursor as usize) as u32*)
     self.cursor += size_of(u32) as u32
     val
 }
 
 fn parse_string_heap_index(self: DynamicParser *mut): u32 {
-    if (self.heap_sizes & 1) != 0 {
+    if (self.file.md_tables_start.heap_sizes & 1) != 0 {
         parse_u32(self)
     } else {
         parse_u16(self) as u32
     }
 }
 fn parse_guid_heap_index(self: DynamicParser *mut): u32 {
-    if (self.heap_sizes & 2) != 0 {
+    if (self.file.md_tables_start.heap_sizes & 2) != 0 {
         parse_u32(self)
     } else {
         parse_u16(self) as u32
     }
 }
 fn parse_blob_heap_index(self: DynamicParser *mut): u32 {
-    if (self.heap_sizes & 4) != 0 {
+    if (self.file.md_tables_start.heap_sizes & 4) != 0 {
         parse_u32(self)
     } else {
         parse_u16(self) as u32
+    }
+}
+MODULE_TABLE: u32 : $00
+TYPEREF_TABLE: u32 : $01
+TYPEDEF_TABLE: u32 : $02
+FIELD_TABLE: u32 : $04
+METHODDEF_TABLE: u32 : $06
+MODULEREF_TABLE: u32 : $1A
+TYPESPEC_TABLE: u32 : $1B
+ASSEMBLYREF_TABLE: u32 : $23
+
+// Returns the number of rows in the table with the given index
+fn get_size_of_table(self: DynamicParser*, index: u32): u32 {
+    if (self.file.md_tables_start.valid & (1 << (index as u64))) == 0 {
+        0
+    } else {
+        index :: count_set_bits_before(self.file.md_tables_start.valid, index as u64) as u32
+        location :: self.file.md_tables_start.first_row_location + index * 4
+        read_u32(self.file.image, location)
+    }
+}
+fn max(a: u32, b: u32): u32 {
+    if a < b {
+        b
+    } else {
+        a
+    }
+}
+
+ResolutionScopeTag :: enum {
+    module
+    module_ref
+    assembly_ref
+    type_ref
+}
+ResolutionScope :: struct {
+    tag: ResolutionScopeTag
+    index: u32
+}
+fn parse_resolution_scope(self: DynamicParser *mut): ResolutionScope {
+    // TODO: compute this once and save it somewhere
+    max_size :: max(
+        max(
+            max(
+                get_size_of_table(self, MODULE_TABLE)
+                get_size_of_table(self, MODULEREF_TABLE)
+            )
+            get_size_of_table(self, ASSEMBLYREF_TABLE)
+        )
+        get_size_of_table(self, TYPEREF_TABLE)
+    )
+
+    coded_index :: if max_size < 1 << (16 - 2) {
+        // Narrow
+        parse_u16(self) as u32
+    } else {
+        // Wide
+        parse_u32(self)
+    }
+
+    ResolutionScope {
+        tag: switch coded_index & 3 {
+            0: ResolutionScopeTag.module
+            1: ResolutionScopeTag.module_ref
+            2: ResolutionScopeTag.assembly_ref
+            3: ResolutionScopeTag.type_ref
+            _: panic("unreachable")
+        }
+        index: coded_index >> 2
+    }
+}
+
+TypeDefOrRefTag :: enum {
+    type_def
+    type_ref
+    type_spec
+}
+TypeDefOrRef :: struct {
+    tag: TypeDefOrRefTag
+    index: u32
+}
+fn parse_type_def_or_ref(self: DynamicParser *mut): TypeDefOrRef {
+    // TODO: compute this once and save it somewhere
+    max_size :: max(
+        max(
+            get_size_of_table(self, TYPEDEF_TABLE)
+            get_size_of_table(self, TYPEREF_TABLE)
+        )
+        get_size_of_table(self, TYPESPEC_TABLE)
+    )
+
+    coded_index :: if max_size < 1 << (16 - 2) {
+        // Narrow
+        parse_u16(self) as u32
+    } else {
+        // Wide
+        parse_u32(self)
+    }
+
+    TypeDefOrRef {
+        tag: switch coded_index & 3 {
+            0: TypeDefOrRefTag.type_def
+            1: TypeDefOrRefTag.type_ref
+            2: TypeDefOrRefTag.type_spec
+            3: panic("invalid tag")
+            _: panic("unreachable")
+        }
+        index: coded_index >> 2
+    }
+}
+fn parse_index_to_table(self: DynamicParser *mut, table_index: u32): u32 {
+    size :: get_size_of_table(self, table_index)
+
+    if size < 1 << 16 {
+        // Narrow
+        parse_u16(self) as u32
+    } else {
+        // Wide
+        parse_u32(self)
     }
 }
 fn main() {
@@ -277,6 +400,17 @@ fn main() {
         blob_header: no_stream()
         guid_header: no_stream()
         md_tables_header: no_stream()
+        md_tables_start: MDTablesStart {
+            reserved1: 0
+            major_version: 0
+            minor_version: 0
+            heap_sizes: 0
+            reserved2: 0
+            valid: 0
+            sorted: 0
+            first_row_location: 0
+        }
+        md_tables_begin_location: 0
     }
     cli_location :: resolve_rva(&file, file.optional_header.cli_header.rva)
     file.cli_header = read_cli_header(metadata, cli_location)
@@ -316,29 +450,30 @@ fn main() {
     }
     // Read #~ stream
     md_tables_start_location :: file.md_tables_header.offset + md_root_location
-    md_tables_start :: read_md_tables_start(file.image, md_tables_start_location)
-    if md_tables_start.reserved1 != 0 || md_tables_start.reserved2 != 1 {
+    file.md_tables_start = read_md_tables_start(file.image, md_tables_start_location)
+    if file.md_tables_start.reserved1 != 0 || file.md_tables_start.reserved2 != 1 {
         panic("unexpected reserved value in metadata tables start")
     }
 
-    // TODO: store an array with the number of rows for each table
-    num_present_tables :: count_set_bits(md_tables_start.valid)
-    tables_begin :: md_tables_start.first_row_location + (num_present_tables * 4) as u32
+    num_present_tables :: count_set_bits(file.md_tables_start.valid)
+    file.md_tables_begin_location = file.md_tables_start.first_row_location + (num_present_tables * 4) as u32
     string_heap_location :: file.strings_header.offset + md_root_location
-    parser := parser(file.image, tables_begin, md_tables_start.heap_sizes)
+    parser := parser(&file, file.md_tables_begin_location)
     i: u64 = 0
     present_i: u32 = 0
+    
     while i < 64 {
-        if (md_tables_start.valid & (1 << i)) != 0 {
-            num_rows_location :: md_tables_start.first_row_location + present_i * 4
+        if (file.md_tables_start.valid & (1 << i)) != 0 {
+            num_rows_location :: file.md_tables_start.first_row_location + present_i * 4
             num_rows :: *((file.image.data as usize + num_rows_location as usize) as u32*)
             switch i {
-                $00: {
+                $00: { // Module
                     print("Module table:\n")
                     j: u32 = 0
                     while j < num_rows {
-                        print("  Module entry:\n")
-                        j += 1
+                        print("  Module entry ")
+                        print_num(j as u64 + 1)
+                        print(":\n")
                         generation :: parse_u16(&mut parser)
                         print("    Generation: ")
                         print_num(generation as u64)
@@ -359,6 +494,87 @@ fn main() {
                         print("    EncBaseId: ")
                         print_num(enc_base_id as u64)
                         print("\n")
+                        j += 1
+                    }
+                }
+                $01: {
+                    SKIP_MOST_TYPEREFS :: true
+                    print("TypeRef table:\n")
+                    j: u32 = 0
+                    num_rows := num_rows
+                    while j < num_rows {
+                        print("  TypeRef entry ")
+                        print_num(j as u64 + 1)
+                        print(":\n")
+                        initial_cursor :: parser.cursor
+                        resolution_scope :: parse_resolution_scope(&mut parser)
+                        print("    ResolutionScope: ")
+                        switch resolution_scope.tag {
+                            .module: print("Module"),
+                            .module_ref: print("ModuleRef"),
+                            .assembly_ref: print("AssemblyRef"),
+                            .type_ref: print("TypeRef")
+                        }
+                        print("(")
+                        print_num(resolution_scope.index as u64)
+                        print(")\n")
+                        type_name :: parse_string_heap_index(&mut parser)
+                        print("    TypeName: ")
+                        print((file.image.data as usize + (string_heap_location as u32 + type_name) as usize) as u8*)
+                        print("\n")
+                        type_namespace :: parse_string_heap_index(&mut parser)
+                        print("    TypeNamespace: ")
+                        print((file.image.data as usize + (string_heap_location as u32 + type_namespace) as usize) as u8*)
+                        print("\n")
+                        row_size :: parser.cursor - initial_cursor
+                        if SKIP_MOST_TYPEREFS {
+                            print("  Skipping the rest of the TypeRefs!\n")
+                            parser.cursor = initial_cursor + row_size * num_rows
+                            // TODO: break expression
+                            num_rows = 0
+                        }
+                        j += 1
+                    }
+                }
+                $02: {
+                    print("TypeDef table:\n")
+                    j: u32 = 0
+                    num_rows: u32 = 2
+                    while j < num_rows {
+                        print("  TypeDef entry ")
+                        print_num(j as u64 + 1)
+                        print(":\n")
+                        flags :: parse_u32(&mut parser)
+                        print("    Flags: ")
+                        print_num(flags as u64)
+                        print("\n")
+                        type_name :: parse_string_heap_index(&mut parser)
+                        print("    TypeName: ")
+                        print((file.image.data as usize + (string_heap_location as u32 + type_name) as usize) as u8*)
+                        print("\n")
+                        type_namespace :: parse_string_heap_index(&mut parser)
+                        print("    TypeNamespace: ")
+                        print((file.image.data as usize + (string_heap_location as u32 + type_namespace) as usize) as u8*)
+                        print("\n")
+                        extends :: parse_type_def_or_ref(&mut parser)
+                        print("    Extends: ")
+                        switch extends.tag {
+                            .type_def: print("TypeDef"),
+                            .type_ref: print("TypeRef"),
+                            .type_spec: print("TypeSpec"),
+                        }
+                        print("(")
+                        print_num(extends.index as u64)
+                        print(")\n")
+                        field_list :: parse_index_to_table(&mut parser, FIELD_TABLE)
+                        print("    FieldList: ")
+                        print_num(field_list as u64)
+                        print("\n")
+                        method_list :: parse_index_to_table(&mut parser, METHODDEF_TABLE)
+                        print("    MethodList: ")
+                        print_num(method_list as u64)
+                        print("\n")
+                        j += 1
                     }
                 }
                 default: {
@@ -431,7 +647,6 @@ fn write_byte(slice: ByteSlice, index: u32, value: u8) {
 fn read_byte(slice: ByteSlice, index: u32): u8 {
     *((slice.data as usize + index as usize) as u8*)
 }
-
 fn read_u32(slice: ByteSlice, index: u32): u32 {
     *((slice.data as usize + index as usize) as u32*)
 }
