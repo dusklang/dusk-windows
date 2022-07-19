@@ -530,7 +530,7 @@ fn main() {
                         if SKIP_MOST_TYPEREFS {
                             print("  Skipping the rest of the TypeRefs!\n")
                             parser.cursor = initial_cursor + row_size * num_rows
-                            // TODO: break expression
+                            // TODO: break expression, leave num_rows as immutable
                             num_rows = 0
                         }
                         j += 1
@@ -539,7 +539,6 @@ fn main() {
                 $02: {
                     print("TypeDef table:\n")
                     j: u32 = 0
-                    num_rows: u32 = 2
                     while j < num_rows {
                         print("  TypeDef entry ")
                         print_num(j as u64 + 1)
@@ -597,13 +596,6 @@ fn main() {
 ByteSlice :: struct {
     size: usize
     data: u8 *mut
-}
-
-fn new_slice(size: usize): ByteSlice {
-    ByteSlice {
-        size: size
-        data: malloc(size) as u8 *mut
-    }
 }
 
 fn read_file(path: i8*): ByteSlice {
@@ -876,4 +868,4 @@ windows :: do {
     parameters.add("nStdHandle", DWORD)
     module.add_extern_prototype("GetStdHandle", parameters, HANDLE, ExternSource.dll("kernel32.dll"))
     module.build()
-}*
+}*/
