@@ -165,15 +165,13 @@ fn get_section(file: PEFile*, index: u16): PESectionHeader* {
 }
 
 fn resolve_rva(file: PEFile*, rva: u32): u32 {
-    i: u16 = 0
     // This variable is here to work around bug #121
     address: u32 = $FFFF
-    while i < file.header.number_of_sections {
+    for i in 0..file.header.number_of_sections {
         section :: get_section(file, i)
         if section.virtual_address <= rva && rva < section.virtual_address + section.size_of_raw_data {
             address = rva - section.virtual_address + section.pointer_to_raw_data
         }
-        i += 1
     }
     if address == $FFFF {
         panic("failed to resolve RVA")
@@ -185,13 +183,11 @@ fn count_set_bits(num: u64): u64 {
     count_set_bits_before(num, 64)
 }
 fn count_set_bits_before(num: u64, bit: u64): u64 {
-    i: u64 = 0
     num_set: u64 = 0
-    while i < bit {
+    for i in 0..bit {
         if (num & (1 << i)) != 0 {
             num_set += 1
         }
-        i += 1
     }
     num_set
 }
@@ -419,9 +415,8 @@ fn main() {
     if file.md_root.part1.signature != $424a5342 {
         panic("invalid metadata magic signature")
     }
-    i: u16 = 0
     cursor := file.md_root.streams
-    while i < file.md_root.part2.number_of_streams {
+    for i in 0..file.md_root.part2.number_of_streams {
         stream_header :: read_md_stream_header(file.image, cursor)
         // TODO: handle duplicate stream headers, I guess
         // TODO: switching on strings
@@ -442,7 +437,6 @@ fn main() {
             print("Found GUID stream header\n")
         }
         next_md_stream_header(stream_header, &mut cursor)
-        i += 1
     }
 
     if file.md_tables_header.size == 0 {
@@ -459,18 +453,15 @@ fn main() {
     file.md_tables_begin_location = file.md_tables_start.first_row_location + (num_present_tables * 4) as u32
     string_heap_location :: file.strings_header.offset + md_root_location
     parser := parser(&file, file.md_tables_begin_location)
-    i: u64 = 0
     present_i: u32 = 0
-    
-    while i < 64 {
+    for i: u64 in 0..64 {
         if (file.md_tables_start.valid & (1 << i)) != 0 {
             num_rows_location :: file.md_tables_start.first_row_location + present_i * 4
             num_rows :: *((file.image.data as usize + num_rows_location as usize) as u32*)
             switch i {
                 $00: { // Module
                     print("Module table:\n")
-                    j: u32 = 0
-                    while j < num_rows {
+                    for j in 0..num_rows {
                         print("  Module entry ")
                         print_num(j as u64 + 1)
                         print(":\n")
@@ -494,15 +485,12 @@ fn main() {
                         print("    EncBaseId: ")
                         print_num(enc_base_id as u64)
                         print("\n")
-                        j += 1
                     }
                 }
                 $01: {
                     SKIP_MOST_TYPEREFS :: true
                     print("TypeRef table:\n")
-                    j: u32 = 0
-                    num_rows := num_rows
-                    while j < num_rows {
+                    for j in 0..num_rows {
                         print("  TypeRef entry ")
                         print_num(j as u64 + 1)
                         print(":\n")
@@ -526,20 +514,17 @@ fn main() {
                         print("    TypeNamespace: ")
                         print((file.image.data as usize + (string_heap_location as u32 + type_namespace) as usize) as u8*)
                         print("\n")
-                        row_size :: parser.cursor - initial_cursor
                         if SKIP_MOST_TYPEREFS {
                             print("  Skipping the rest of the TypeRefs!\n")
+                            row_size :: parser.cursor - initial_cursor
                             parser.cursor = initial_cursor + row_size * num_rows
-                            // TODO: break expression, leave num_rows as immutable
-                            num_rows = 0
+                            break
                         }
-                        j += 1
                     }
                 }
                 $02: {
                     print("TypeDef table:\n")
-                    j: u32 = 0
-                    while j < num_rows {
+                    for j in 0..num_rows {
                         print("  TypeDef entry ")
                         print_num(j as u64 + 1)
                         print(":\n")
@@ -573,7 +558,6 @@ fn main() {
                         print("    MethodList: ")
                         print_num(method_list as u64)
                         print("\n")
-                        j += 1
                     }
                 }
                 default: {
@@ -584,7 +568,6 @@ fn main() {
             }
             present_i += 1
         }
-        i += 1
     }
 
     free_slice(&mut metadata)
@@ -614,10 +597,10 @@ fn read_file(path: i8*): ByteSlice {
     size :: size as usize
     buf :: malloc(size)
 
-    i := 0 as usize
+    i: usize = 0
     while i < size {
         bytes_to_read :: (size - i) as DWORD
-        bytes_read := 0 as DWORD
+        bytes_read: DWORD = 0
         succ :: kernel32.ReadFile(file, (buf as usize + i) as void *mut, bytes_to_read, &mut bytes_read, 0 as usize as OVERLAPPED *mut)
         if succ == FALSE {
             panic("unable to read from file")
