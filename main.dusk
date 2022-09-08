@@ -412,7 +412,7 @@ fn main() {
     file.cli_header = read_cli_header(metadata, cli_location)
     md_root_location :: resolve_rva(&file, file.cli_header.meta_data.rva)
     file.md_root = read_metadata_root(metadata, md_root_location)
-    if file.md_root.part1.signature != $424a5342 {
+    if file.md_root.part1.signature != $424a_5342 {
         panic("invalid metadata magic signature")
     }
     cursor := file.md_root.streams
